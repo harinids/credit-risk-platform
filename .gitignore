@@ -1,0 +1,41 @@
+﻿# Environment / secrets
+.env
+
+# Data
+data/raw/
+*.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+venv/
+env/
+*.egg-info/
+
+# Models (optional — remove these two lines if you want models/ tracked)
+# models/*.joblib
+
+# OS/editor
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Node (docx-related if any local scratch scripts)
+node_modules/
+
+# Logs
+*.log
+
+# Docker
+docker-compose.override.yml
+
+# Generated SQLite DB (665MB, regenerate via src/nl2sql/db_setup.py)
+data/processed/*.db
+
+# Un-ignore small derived CSVs (not raw dataset)
+!models/*.csv
