@@ -1,28 +1,27 @@
 """
 FastAPI entrypoint for the Credit Risk Intelligence Platform backend.
 
-Status:
-  - /health          -> fully functional
-  - /chat            -> fully functional (NL-to-SQL + conversation memory)
-  - /predict, /explain, /rules, /eda/summary -> still 501 stubs, next phase
+All endpoints now wired to real logic:
+  /health        -> DB connectivity check
+  /chat          -> NL-to-SQL + conversation memory + semantic caching
+  /predict       -> risk score + band for an existing applicant (by sk_id_curr)
+  /explain       -> SHAP-based explanation for an existing applicant
+  /rules         -> derived business rules (surrogate tree distillation)
+  /eda/summary   -> dataset summary, insights, data quality flags
 
-Conversation memory design note: wired at THIS layer (the /chat route)
-rather than inside src.nl2sql.sql_generator.ask(), which already accepts
-a conversation_context string parameter. This route fetches prior turns
-via conversation_manager.get_context_string(session_id) before calling
-ask(), then saves the new turn via conversation_manager.add_turn(...)
-after ask() returns. This achieves multi-turn memory with zero changes
-to the already-tested sql_generator.py.
+/predict and /explain look up an existing applicant's precomputed feature
+row by sk_id_curr rather than accepting raw form fields, since features
+are derived from relational joins across 6 tables - this matches a
+realistic bank workflow (scoring an application already on file). Use
+GET /predict/sample-ids to get valid IDs to try.
 """
 
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-load_dotenv()  # so GROQ_API_KEY / GROQ_MODEL from .env reach os.getenv()
-                # calls in sql_generator.py even when running via uvicorn
-                # rather than a shell that already has them exported
+load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 
@@ -30,6 +29,9 @@ from src.api.config import get_settings
 from src.nl2sql.sql_generator import ask as nl2sql_ask
 from src.nl2sql.conversation import conversation_manager
 from src.nl2sql.cache import semantic_cache
+from src.ml.predict import predict_for_id, explain_for_id, get_sample_ids
+from src.rules.serve import load_rules_text, load_depth_sensitivity
+from src.eda.eda import get_eda_summary_dict
 
 settings = get_settings()
 
@@ -43,7 +45,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Credit Risk Intelligence Platform API",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -70,7 +72,7 @@ def root():
     return {"message": "Credit Risk Intelligence Platform API", "docs": "/docs"}
 
 
-# --- Chat (NL-to-SQL + conversation memory) ---
+# --- Chat (NL-to-SQL + conversation memory + semantic caching) ---
 
 class ChatRequest(BaseModel):
     question: str
@@ -91,10 +93,6 @@ class ChatResponse(BaseModel):
 def chat(request: ChatRequest):
     prior_context = conversation_manager.get_context_string(request.session_id)
 
-    # Check semantic cache first - skips both LLM calls (SQL generation +
-    # relevance check) entirely on a hit. Cache key includes conversation
-    # context, not just the question text, since the same follow-up
-    # phrasing means something different depending on prior turns.
     cached_result = semantic_cache.get(request.question, prior_context)
     if cached_result is not None:
         if "error" not in cached_result:
@@ -120,9 +118,6 @@ def chat(request: ChatRequest):
         verbose=False,
     )
 
-    # Only cache and persist the turn if we actually got a usable result —
-    # a validation/execution failure shouldn't pollute the cache or future
-    # conversation context with a broken query.
     if "error" not in result:
         semantic_cache.set(request.question, prior_context, result)
         conversation_manager.add_turn(
@@ -145,7 +140,6 @@ def chat(request: ChatRequest):
 
 @app.get("/chat/cache/stats")
 def cache_stats():
-    """Exposes cache hit-rate for the README's token-optimization documentation."""
     return semantic_cache.stats()
 
 
@@ -155,23 +149,42 @@ def clear_chat_session(session_id: str):
     return {"status": "cleared", "session_id": session_id}
 
 
-# --- Stub routers, implemented in later phases ---
+# --- Prediction + Explainability ---
 
-@app.post("/predict")
-def predict_stub():
-    return {"status": "not_implemented", "detail": "ML risk scoring lands in Phase 3."}, 501
+@app.get("/predict/sample-ids")
+def predict_sample_ids(limit: int = 20):
+    """Returns valid sk_id_curr values from the dataset to try with /predict and /explain."""
+    return {"sample_ids": get_sample_ids(limit)}
 
 
-@app.post("/explain")
-def explain_stub():
-    return {"status": "not_implemented", "detail": "Explainability lands in Phase 4."}, 501
+@app.get("/predict/{sk_id_curr}")
+def predict(sk_id_curr: int):
+    try:
+        return predict_for_id(sk_id_curr)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
+
+@app.get("/explain/{sk_id_curr}")
+def explain(sk_id_curr: int, top_n: int = 5):
+    try:
+        return explain_for_id(sk_id_curr, top_n=top_n)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+# --- Business Rules ---
 
 @app.get("/rules")
-def rules_stub():
-    return {"status": "not_implemented", "detail": "Rule derivation lands in Phase 4."}, 501
+def rules():
+    return {
+        "rules_text": load_rules_text(),
+        "depth_sensitivity": load_depth_sensitivity(),
+    }
 
+
+# --- EDA ---
 
 @app.get("/eda/summary")
-def eda_summary_stub():
-    return {"status": "not_implemented", "detail": "EDA endpoints land in Phase 1."}, 501
+def eda_summary():
+    return get_eda_summary_dict()

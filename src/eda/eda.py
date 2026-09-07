@@ -264,5 +264,43 @@ def main():
     print("=" * 70)
 
 
-if __name__ == "__main__":
     main()
+
+
+def get_eda_summary_dict() -> dict:
+    """
+    Structured, API-friendly version of the EDA output for the /eda/summary
+    endpoint. Reuses the same insight-generation and categorization logic
+    as main() (business_insights, feature_categorization) rather than
+    duplicating computation - just wraps it for JSON serialization instead
+    of console printing.
+    """
+    df = load_main_table()
+
+    target_counts = df["TARGET"].value_counts(normalize=True) * 100
+    missing = df.isnull().mean().sort_values(ascending=False) * 100
+    top_missing = missing[missing > 0].head(10).round(1).to_dict()
+
+    categories = feature_categorization(df)
+    category_counts = {cat: len(cols) for cat, cols in categories.items()}
+
+    insights = business_insights(df)
+
+    anomaly_count = int((df["DAYS_EMPLOYED"] == 365243).sum())
+
+    return {
+        "rows": int(df.shape[0]),
+        "columns": int(df.shape[1]),
+        "target_distribution": {
+            "repaid_pct": round(float(target_counts.get(0, 0)), 2),
+            "defaulted_pct": round(float(target_counts.get(1, 0)), 2),
+        },
+        "class_imbalance_ratio": round(float(target_counts.get(0, 0) / target_counts.get(1, 1)), 1),
+        "top_missing_columns": top_missing,
+        "feature_categories": category_counts,
+        "business_insights": insights,
+        "data_quality_flags": [
+            f"DAYS_EMPLOYED contains {anomaly_count:,} rows (~18%) with sentinel value 365243, "
+            f"treated as missing + explicitly flagged during feature engineering, not left as a real value."
+        ],
+    }
