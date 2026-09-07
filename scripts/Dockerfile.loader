@@ -1,0 +1,10 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+COPY scripts/requirements-loader.txt .
+RUN pip install --no-cache-dir -r requirements-loader.txt
+
+COPY scripts/load_data_to_db.py .
+
+CMD ["python", "load_data_to_db.py"]
